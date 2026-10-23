@@ -30,7 +30,7 @@ bash dsh-lark-bridge/install.sh
 - **/panel** — 发送控制台 + 会话浏览卡片
 - **/new [路径]** — 新建会话
 - **/use <序号>** — 切换会话
-- **/model** — 切换模型（vision-model 支持图片）
+- **/model** — 切换模型（需选支持图片输入的模型才能传图）
 - **/watch** — 直播正在运行的任务
 - **/export** — 导出会话记录到飞书文档
 
@@ -59,6 +59,6 @@ bash dsh-lark-bridge/install.sh
 |---|---|
 | 发消息没反应 | `tail bridge.log` 看是否收到事件；检查 lark-cli 认证 |
 | 卡片按钮没反应 | 确认飞书开发者后台已启用事件回调（长连接模式） |
-| 图片报"不支持" | 模型是 text-model（纯文本），用户需发 /model vision-model 切换 |
+| 图片报"不支持" | 当前模型是纯文本模型，发 /model 切到支持视觉的模型 |
 | Web 中继不可用 | 重启 dsh web 加载新版插件；检查 token 文件存在 |
 | bridge 反复重启 | 查看日志中的 ERR_MODULE_NOT_FOUND，确认 dsh 安装完整 |

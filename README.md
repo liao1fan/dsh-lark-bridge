@@ -86,6 +86,8 @@ bash dsh-lark-bridge/install.sh
 
 运行时会自动发现 dsh 安装路径与 `~/.dsh` 数据目录，也可以用环境变量覆盖：`DSH_ROOT`（`@deepseek-ai/dsh` 包路径）、`DSH_HOME`（dsh 数据目录）。
 
+安装脚本不会写死任何模型网关：ACP profile 里已有的 `provider`/`model` 会原样保留；需要指定时用 `DSH_ACP_PROVIDER`、`DSH_ACP_MODEL` 环境变量，两者都没有则跳过这一步。
+
 ## 工作原理
 
 - **ACP 连接**：`dsh --profile acp` 走 JSON-RPC over stdio；桥接使用 `session/new|list|resume|prompt|cancel|set_config_option`

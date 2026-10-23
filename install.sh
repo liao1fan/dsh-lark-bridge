@@ -223,17 +223,29 @@ else
 fi
 
 # 配置 ACP profile（模型路由）
+# 不写死任何具体网关/模型：优先保留已有配置，其次读环境变量，都没有则跳过
 ACP_PATCH="$HOME/.dsh/profiles/acp/cordis.patch.yml"
 if [ -d "$HOME/.dsh/profiles/acp" ]; then
-  cat > "$ACP_PATCH" << 'ACPEOF'
+  EXIST_PROVIDER=""; EXIST_MODEL=""
+  if [ -f "$ACP_PATCH" ]; then
+    EXIST_PROVIDER=$(sed -n 's/^[[:space:]]*provider:[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$ACP_PATCH" | head -1 | tr -d '"')
+    EXIST_MODEL=$(sed -n 's/^[[:space:]]*model:[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$ACP_PATCH" | head -1 | tr -d '"')
+  fi
+  ACP_PROVIDER="${DSH_ACP_PROVIDER:-$EXIST_PROVIDER}"
+  ACP_MODEL="${DSH_ACP_MODEL:-$EXIST_MODEL}"
+  if [ -n "$ACP_PROVIDER" ] && [ -n "$ACP_MODEL" ]; then
+    cat > "$ACP_PATCH" << ACPEOF
 # Route the ACP profile's sessions to the configured gateway
 - id: acp
   config:
-    provider: example-provider
-    model: example-model
+    provider: $ACP_PROVIDER
+    model: $ACP_MODEL
     sessionListPageSize: 100
 ACPEOF
-  echo "  ✅ ACP profile 模型路由已配置"
+    echo "  ✅ ACP profile 模型路由：$ACP_PROVIDER / $ACP_MODEL"
+  else
+    echo "  ℹ️  未指定 ACP 模型路由，跳过（需要时：DSH_ACP_PROVIDER=<provider> DSH_ACP_MODEL=<model> bash install.sh）"
+  fi
 fi
 
 echo ""

@@ -846,7 +846,7 @@ async function handleImageMessage(chatId, ev) {
     const buf = readFileSync(path);
     ctx.pendingImage = { data: buf.toString("base64"), mediaType: sniffImage(buf), at: Date.now() };
     log("image received", ev.message_id, buf.length, "bytes");
-    await sendText(chatId, `🖼 图片已接收（${Math.round(buf.length / 1024)}KB）。直接发文字说明，我会把图片连同文字一起发给当前会话——5 分钟内有效。当前模型需支持图片输入（vision-model 支持，text-model 纯文本）。`);
+    await sendText(chatId, `🖼 图片已接收（${Math.round(buf.length / 1024)}KB）。直接发文字说明，我会把图片连同文字一起发给当前会话——5 分钟内有效。若当前模型不支持图片输入，先发 `/model` 切到支持视觉的模型。`);
   } catch (e) { await sendText(chatId, `❌ 图片处理失败：${e.message}`); }
 }
 async function handleFileMessage(chatId, ev) {
@@ -876,6 +876,16 @@ async function handleFileMessage(chatId, ev) {
   } catch (e) { await sendText(chatId, `❌ 文件处理失败：${e.message}`); }
 }
 const imageUnsupported = (msg) => /does not support image|MODEL_DOES_NOT_SUPPORT_IMAGES|image input|attachment-invalid|不支持图片/i.test(String(msg));
+// 当前会话的模型展示名（不写死任何具体模型 / 网关名）
+function currentModelLabel(sessionId) {
+  try {
+    const model = (ACP.getConfigOptions(sessionId) ?? []).find((o) => o.id === "model");
+    const val = model?.currentValue;
+    if (!val) return "当前模型";
+    for (const g of model?.options ?? []) for (const o of g.options ?? []) if (o.value === val) return `当前模型（${g.group ?? g.name} · ${o.name}）`;
+    return `当前模型（${val}）`;
+  } catch { return "当前模型"; }
+}
 
 // ---------------- runPrompt ----------------
 async function runPrompt(chatId, text) {
@@ -921,7 +931,7 @@ async function runPrompt(chatId, text) {
     log("relay send result:", r.ok ? "ok" : errStr.slice(0, 200));
     if (!r.ok && img && imageUnsupported(errStr)) {
       ctx.pendingImage = img;
-      await sendText(chatId, "🖼 **当前模型（text-model）不支持图片输入。**\n\n1. 发 `/model vision-model` 切换模型\n2. 直接再发一条文字（图片已保留，不用重新传）");
+      await sendText(chatId, `🖼 **${currentModelLabel(sid)}不支持图片输入。**\n\n1. 发 \`/model\` 切到支持图片的模型\n2. 直接再发一条文字（图片已保留，不用重新传）`);
       ctx.busy = false; chatBusyBySession.set(sid, false); return;
     }
     if (!r.ok) {
@@ -997,7 +1007,7 @@ async function runPrompt(chatId, text) {
     const msg = e?.message ?? String(e);
     if (img && (imageUnsupported(msg) || /image/i.test(msg) && /not support|unsupported|invalid/i.test(msg))) {
       ctx.pendingImage = img;
-      await sendText(chatId, "🖼 **当前模型（text-model）不支持图片输入。**\n\n1. 发 `/model vision-model` 切换模型\n2. 直接再发一条文字（图片已保留）");
+      await sendText(chatId, `🖼 **${currentModelLabel(sid)}不支持图片输入。**\n\n1. 发 \`/model\` 切到支持图片的模型\n2. 直接再发一条文字（图片已保留）`);
     } else {
       await finalize(chunks.join("").trim(), "error", msg);
     }
