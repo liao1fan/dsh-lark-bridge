@@ -1,0 +1,4 @@
+# 把 bridge-control 插件挂进 web profile
+- insert:
+    - id: bridge-control
+      name: dsh-bridge-control

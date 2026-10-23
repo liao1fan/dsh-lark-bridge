@@ -1,0 +1,20 @@
+{
+  "allowUsers": ["ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"],
+  "defaultCwd": "/root",
+  "maxListItems": 20,
+  "firstStatusDelayMs": 12000,
+  "statusIntervalMs": 10000,
+  "maxMessageChars": 9000,
+  "recentWorkspaceCount": 8,
+  "greetOnStart": true,
+  "autoApprovePermissions": true,
+  "testChats": [],
+  "poll": { "enabled": true, "intervalMs": 3000, "chats": [] },
+  "stream": { "enabled": true, "intervalMs": 2000, "maxCardChars": 20000 },
+  "dashboard": { "intervalMs": 5000 },
+  "watch": { "timeoutMs": 1800000 },
+  "takeover": { "timeoutMs": 300000 },
+  "idleReleaseMs": 600000,
+  "stalledTurnMs": 120000,
+  "webControl": { "url": "http://127.0.0.1:3090/bridge-control" }
+}

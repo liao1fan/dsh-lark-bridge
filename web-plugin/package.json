@@ -1,0 +1,9 @@
+{
+  "name": "dsh-bridge-control",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "description": "Loopback-only control endpoint for the Feishu dsh bridge"
+}

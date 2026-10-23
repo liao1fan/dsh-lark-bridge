@@ -1,0 +1,10 @@
+# 运行时生成的文件（含个人 open_id / chat_id / token，切勿提交）
+config/bridge.config.json
+config/state.json
+config/web-control-token
+config/*.log
+config/events.ndjson
+
+node_modules/
+*.tar.gz
+.DS_Store
