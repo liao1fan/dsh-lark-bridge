@@ -102,6 +102,7 @@ bash dsh-lark-bridge/install.sh
 - **会话读写**：直接读取 `~/.dsh/sessions/<container>/<id>/session.v3.jsonl.zstd`（只读打开，不抢写锁）
 - **单写者锁**：同一会话同一时间只允许一个前端写入；锁由 dsh 进程持有，桥接通过探测 `session.lock` 判断归属
 - **不会悄悄串会话**：切换被锁挡住时桥接会记住目标会话，下条消息先自动重试；仍被占用就明确拒发并说明原因（不会另建新会话把内容写丢）
+- **侧边栏同步**：dsh web 的 workspace 注册表是**进程内快照**（外部改 `workspace.json` 它看不到，且会被它下次写入覆盖）。所以 bridge 新建会话后，会通过 web 插件把它 `attach` 进 web 的内存注册表，侧边栏立刻可见；插件不可用时才退回写文件（重启 web 后生效）
 - **Web 中继**：桥接挂载的 web 插件暴露 `/bridge-control`（仅回环 + token 鉴权），由持有锁的 web 进程代为 `prompt`
 - **流式卡片**：Card 2.0 streaming 模式 + cardkit 文本元素增量更新；超过 10 分钟自动重开流式，避免 `300309`
 

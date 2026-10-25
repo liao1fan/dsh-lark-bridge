@@ -1,7 +1,8 @@
 /**
  * dsh-bridge-control — 飞书桥的 web 内嵌控制端点（仅本机回环 + token 鉴权）。
  * POST /bridge-control (X-Bridge-Token)
- *   {"action":"status"}  -> {ok, held:[{sessionId,cwd}], version:2}
+ *   {"action":"status"}  -> {ok, held:[{sessionId,cwd}], version:3}
+ *   {"action":"register",sessionId,cwd} -> 把 ACP 新建的会话挂进 web 侧边栏
  *   {"action":"send",...} -> {ok, accepted}
  *   {"action":"cancel",..}-> {ok, accepted}
  */
@@ -37,10 +38,21 @@ function apply(ctx) {
 					if (req.headers["x-bridge-token"] !== token) return send(401, { ok: false, error: "bad token" });
 					let body = "";
 					for await (const chunk of req) body += chunk;
-					const { action, sessionId, text, image } = JSON.parse(body || "{}");
+					const { action, sessionId, cwd, text, image } = JSON.parse(body || "{}");
 					if (action === "status") {
 						const held = c.agents.list().map((a) => ({ sessionId: a.session.id, cwd: a.session.header.cwd }));
-						return send(200, { ok: true, held, version: 2 });
+						return send(200, { ok: true, held, version: 3 });
+					}
+					// 让 web 侧边栏立刻认识由 ACP（bridge）新建的会话：
+					// web 的 workspace 注册表是进程内快照，外部改 workspace.json 它看不到，必须走服务 API
+					if (action === "register") {
+						if (typeof sessionId !== "string" || typeof cwd !== "string") return send(400, { ok: false, error: "sessionId and cwd required" });
+						const registry = c.get?.("workspaceRegistry") ?? ctx.get?.("workspaceRegistry");
+						if (!registry) return send(503, { ok: false, error: "workspaceRegistry service unavailable" });
+						const workspace = await registry.resolveByPath(cwd);
+						if (!workspace) return send(404, { ok: false, error: `no workspace registered for ${cwd}` });
+						await workspace.attachSession(sessionId);
+						return send(200, { ok: true, attached: sessionId, workspaceId: workspace.id });
 					}
 					if (action === "send") {
 						if (typeof sessionId !== "string" || typeof text !== "string" || !text.trim()) return send(400, { ok: false, error: "sessionId and non-empty text required" });

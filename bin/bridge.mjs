@@ -239,6 +239,7 @@ class Acp {
     const r = await this.ctx.request(methods.agent.session.new, { cwd, mcpServers: [] });
     this.active.add(r.sessionId); if (r.configOptions) this.configOptions.set(r.sessionId, r.configOptions);
     try { await this.applyDefaultModel(r.sessionId); } catch (e) { log("apply defaultModel failed", e?.message); }
+    try { await registerSessionInGui(r.sessionId, cwd); } catch (e) { log("register failed", e?.message); }
     return r;
   }
   // 把 CONFIG.defaultModel 套到新会话上（profile 里的 provider/model 只用于能力声明，例如图片能力）
@@ -424,7 +425,13 @@ function sessionDirFor(cwd, sessionId) {
   }
   return null;
 }
-function registerSessionInGui(sessionId, cwd) {
+async function registerSessionInGui(sessionId, cwd) {
+  // 先让 web 进程通过服务 API 挂进内存注册表（重启后侧边栏立刻可见）
+  try {
+    const r = await webControl("register", { sessionId, cwd });
+    if (r?.ok) { log("registered in web sidebar", shortId(sessionId)); return; }
+    if (r && r.error) log("web register skipped:", String(r.error).slice(0, 140));
+  } catch (e) { log("web register error", e?.message); }
   try {
     const d = JSON.parse(readFileSync(WORKSPACE_JSON, "utf8"));
     const tables = (d.tables ??= {}); const ws = (tables.workspaces ??= {});
@@ -1001,8 +1008,8 @@ async function runPrompt(chatId, text) {
     if (files.length) relayText = `（用户上传了文件：${files.map((f) => `${f.name} 在 ${f.path}`).join("、")}）\n\n${text}`;
     const sendPayload = { sessionId: sid, text: relayText };
     if (img) {
-      if (probe.version === 2) sendPayload.image = { mediaType: img.mediaType, data: img.data };
-      else await sendText(chatId, "⚠️ 中继模式图片支持需重启 dsh web 加载新版插件，本次仅发送文字。");
+      if ((probe.version ?? 0) >= 3) sendPayload.image = { mediaType: img.mediaType, data: img.data };
+      else await sendText(chatId, "⚠️ 中继模式图片支持需要 web 侧插件为 v3（重启 dsh web 后生效），本次仅发送文字。");
     }
     const r = await webControl("send", sendPayload);
     const errStr = String(r.error ?? "") + " " + JSON.stringify(r);
