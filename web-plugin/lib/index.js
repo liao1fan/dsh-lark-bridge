@@ -17,10 +17,13 @@ const TOKEN_PATH = process.env.DSH_BRIDGE_TOKEN_FILE
 const name = "bridge-control";
 const inject = ["sessionController", "agents", "webServer"];
 
+// 每次请求都重新读 token：支持安装后才生成 / 轮换 token 而无需重启 dsh web
+function readToken() {
+	try { return readFileSync(TOKEN_PATH, "utf8").trim(); } catch { return ""; }
+}
+
 function apply(ctx) {
 	ctx.inject(inject, (c) => {
-		let token = "";
-		try { token = readFileSync(TOKEN_PATH, "utf8").trim(); } catch { }
 		const remove = c.webServer.register({
 			kind: "exact",
 			path: "/bridge-control",
@@ -29,7 +32,8 @@ function apply(ctx) {
 				try {
 					const remote = req.socket.remoteAddress ?? "";
 					if (remote !== "127.0.0.1" && remote !== "::1" && remote !== "::ffff:127.0.0.1") return send(403, { ok: false, error: "loopback only" });
-					if (!token) return send(500, { ok: false, error: "control token not configured" });
+					const token = readToken();
+					if (!token) return send(500, { ok: false, error: `control token not configured (${TOKEN_PATH})` });
 					if (req.headers["x-bridge-token"] !== token) return send(401, { ok: false, error: "bad token" });
 					let body = "";
 					for await (const chunk of req) body += chunk;
@@ -42,7 +46,7 @@ function apply(ctx) {
 						if (typeof sessionId !== "string" || typeof text !== "string" || !text.trim()) return send(400, { ok: false, error: "sessionId and non-empty text required" });
 						const content = [];
 						if (image && typeof image.mediaType === "string" && typeof image.data === "string") {
-							content.push({ type: "image", mediaType: image.mediaType, data: image.data, name: image.name ?? "image" });
+							content.push({ type: "image", data: image.data, mimeType: image.mediaType });
 						}
 						content.push({ type: "text", text });
 						const accepted = await c.sessionController.prompt({ requestId: randomUUID(), sessionId, mode: "queue", content }, AbortSignal.timeout(15000));

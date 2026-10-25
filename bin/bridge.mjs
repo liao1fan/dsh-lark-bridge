@@ -62,7 +62,11 @@ const CONFIG = JSON.parse(readFileSync(HERE + "../config/bridge.config.json", "u
 const STATE_PATH = HERE + "../config/state.json";
 let STATE = { chats: {} };
 try { STATE = { chats: {}, ...JSON.parse(readFileSync(STATE_PATH, "utf8")) }; } catch { }
-function saveState() { try { writeFileSync(STATE_PATH, JSON.stringify(STATE, null, 2)); } catch (e) { log("state save failed", e.message); } }
+function saveState() {
+  try {
+    writeFileSync(STATE_PATH, JSON.stringify(STATE, (k, v) => (k === "pendingImage" || k === "pendingFile") ? undefined : v, 2));
+  } catch (e) { log("state save failed", e.message); }
+}
 const log = (...a) => console.error(new Date().toISOString(), ...a);
 
 // ---------------- lark helpers ----------------
@@ -231,7 +235,25 @@ class Acp {
   emitActivity(sid, text) { (this.activityHandlers ??= new Map()); (this.activityHandlers.get(sid) ?? []).forEach((fn) => fn(text)); }
   onActivity(sid, fn) { (this.activityHandlers ??= new Map()); if (!this.activityHandlers.has(sid)) this.activityHandlers.set(sid, []); this.activityHandlers.get(sid).push(fn); return () => { this.activityHandlers.set(sid, this.activityHandlers.get(sid).filter((f) => f !== fn)); }; }
   async list() { return (await this.ctx.request(methods.agent.session.list, {})).sessions ?? []; }
-  async newSession(cwd) { const r = await this.ctx.request(methods.agent.session.new, { cwd, mcpServers: [] }); this.active.add(r.sessionId); if (r.configOptions) this.configOptions.set(r.sessionId, r.configOptions); return r; }
+  async newSession(cwd) {
+    const r = await this.ctx.request(methods.agent.session.new, { cwd, mcpServers: [] });
+    this.active.add(r.sessionId); if (r.configOptions) this.configOptions.set(r.sessionId, r.configOptions);
+    try { await this.applyDefaultModel(r.sessionId); } catch (e) { log("apply defaultModel failed", e?.message); }
+    return r;
+  }
+  // 把 CONFIG.defaultModel 套到新会话上（profile 里的 provider/model 只用于能力声明，例如图片能力）
+  async applyDefaultModel(sessionId) {
+    const want = CONFIG.defaultModel; if (!want) return null;
+    const co = this.getConfigOptions(sessionId) ?? [];
+    const m = co.find((o) => o.id === "model"); if (!m) return null;
+    const flat = []; for (const g of m.options ?? []) for (const o of g.options ?? []) flat.push({ group: g.group ?? g.name, name: o.name, value: o.value });
+    const kw = String(want).toLowerCase();
+    const hit = flat.find((o) => o.value.toLowerCase().includes(kw) || `${o.group} ${o.name}`.toLowerCase().includes(kw));
+    if (!hit || m.currentValue === hit.value) return null;
+    await this.setConfigOption(sessionId, "model", hit.value);
+    log("defaultModel applied", sessionId.slice(0, 8), "->", hit.name);
+    return hit.name;
+  }
   async ensureActive(sessionId, cwd) {
     if (this.active.has(sessionId)) return;
     try {
@@ -246,7 +268,8 @@ class Acp {
   async prompt(sessionId, text, image, files) {
     const ac = new AbortController(); this.promptAborts.set(sessionId, ac);
     const blocks = [];
-    if (image) blocks.push({ type: "image", mediaType: image.mediaType, data: image.data });
+    // ACP 的图片块字段是 mimeType（不是 mediaType），写错会被 dsh 判为 Invalid params
+    if (image) blocks.push({ type: "image", data: image.data, mimeType: image.mediaType });
     for (const f of files ?? []) blocks.push({ type: "resource_link", name: f.name, uri: `file://${f.path}` });
     blocks.push({ type: "text", text });
     try { return await this.ctx.request(methods.agent.session.prompt, { sessionId, prompt: blocks }, { cancellationSignal: ac.signal }); }
@@ -533,7 +556,7 @@ async function startSpectator(chatId, sessionId, cwd) {
 async function trySwitch(chatId, sessionId, cwd) {
   const ctx = chatCtx(chatId); const prev = ctx.sessionId;
   await ACP.ensureActive(sessionId, cwd);
-  ctx.sessionId = sessionId; ctx.cwd = cwd; ctx.relay = false; saveState();
+  ctx.sessionId = sessionId; ctx.cwd = cwd; ctx.relay = false; ctx.intendedSession = null; saveState();
   registerSessionInGui(sessionId, cwd);
   if (prev && prev !== sessionId && ACP.active.has(prev) && !chatBusyBySession.get(prev)) {
     try { await ACP.closeSession(prev); log("auto-released", shortId(prev)); } catch (e) { log("auto-release failed", e.message); }
@@ -542,12 +565,15 @@ async function trySwitch(chatId, sessionId, cwd) {
   await sendFullHistory(chatId, sessionId, 3);
 }
 async function tryRelaySwitch(chatId, sessionId, cwd) {
-  const probe = await webControl("status"); if (!probe.ok) return false;
+  const ctx0 = chatCtx(chatId);
+  const probe = await webControl("status");
+  if (!probe.ok) { ctx0.relayError = String(probe.error ?? "web 控制端点不可达").slice(0, 160); saveState(); return false; }
+  ctx0.relayError = null; saveState();
   const heldIds = new Set((probe.held ?? []).map((h) => h.sessionId));
   const bare = sessionId.replace(/^session-/, "");
   if (!heldIds.has(sessionId) && !heldIds.has(bare) && !heldIds.has("session-" + bare)) return false;
   const ctx = chatCtx(chatId);
-  ctx.sessionId = sessionId; ctx.cwd = cwd; ctx.relay = true; saveState();
+  ctx.sessionId = sessionId; ctx.cwd = cwd; ctx.relay = true; ctx.intendedSession = null; saveState();
   log("relay switch", chatId, "->", sessionId);
   await sendMarkdown(chatId, `✅ 已切换到会话 \`${shortId(sessionId)}\`（工作区 \`${cwd}\` · 🔗**Web中继**）\n\n该会话被 Web 持有：你的消息将经 dsh web 进程执行，Web 侧同步可见，无需等锁。最近对话马上发来（全文）：`);
   await sendFullHistory(chatId, sessionId, 3);
@@ -567,7 +593,12 @@ async function dashboardTick() {
     const ctx = chatCtx(chatId);
     for (const [key, t] of [...pendingTakeovers]) {
       if (t.chatId !== chatId) continue;
-      if (Date.now() - t.addedAt > (CONFIG.takeover?.timeoutMs ?? 300000)) { pendingTakeovers.delete(key); await sendText(chatId, `⌛ 等待 \`${shortId(t.sessionId)}\` 的锁超时，已取消。`); continue; }
+      if (Date.now() - t.addedAt > (CONFIG.takeover?.timeoutMs ?? 300000)) {
+        pendingTakeovers.delete(key);
+        const why = ctx.relayError ? `（Web 中继不可用：\`${ctx.relayError}\`）` : "";
+        await sendText(chatId, `⌛ 等待 \`${shortId(t.sessionId)}\` 的锁超时${why}，已停止自动切换。\n\n**注意：现在没有绑定会话**——下次发消息会再重试切换到它；想直接开始请发 \`/new <路径>\`。`);
+        continue;
+      }
       const dir = sessionDirFor(t.cwd, t.sessionId);
       const held = dir ? await flockHeld(dir + "/session.lock") : false;
       if (!held) {
@@ -819,6 +850,15 @@ async function sendFreshCards(chatId) {
 }
 
 // ---------------- image / file handling ----------------
+// 事件流与轮询兜底可能重复投递同一张图/同一个文件，按 message_id 去重
+const handledMedia = new Set();
+function seenMedia(id) {
+  if (!id) return false;
+  if (handledMedia.has(id)) return true;
+  handledMedia.add(id);
+  if (handledMedia.size > 300) handledMedia.delete(handledMedia.values().next().value);
+  return false;
+}
 function sniffImage(buf) {
   if (buf.length > 3 && buf[0] === 0x89 && buf[1] === 0x50) return "image/png";
   if (buf.length > 2 && buf[0] === 0xff && buf[1] === 0xd8) return "image/jpeg";
@@ -827,6 +867,7 @@ function sniffImage(buf) {
   return "image/png";
 }
 async function handleImageMessage(chatId, ev) {
+  if (seenMedia(ev.message_id)) { log("image dup ignored", ev.message_id); return; }
   const ctx = chatCtx(chatId);
   let imageKey = "";
   try { imageKey = JSON.parse(ev.content ?? "{}").image_key ?? ""; } catch { }
@@ -846,10 +887,13 @@ async function handleImageMessage(chatId, ev) {
     const buf = readFileSync(path);
     ctx.pendingImage = { data: buf.toString("base64"), mediaType: sniffImage(buf), at: Date.now() };
     log("image received", ev.message_id, buf.length, "bytes");
-    await sendText(chatId, `🖼 图片已接收（${Math.round(buf.length / 1024)}KB）。直接发文字说明，我会把图片连同文字一起发给当前会话——5 分钟内有效。若当前模型不支持图片输入，先发 `/model` 切到支持视觉的模型。`);
-  } catch (e) { await sendText(chatId, `❌ 图片处理失败：${e.message}`); }
+    log("image ack sending", chatId);
+    const ackMid = await sendText(chatId, `🖼 图片已接收（${buf.length < 1024 ? `${buf.length}B` : `${Math.round(buf.length / 1024)}KB`}）。直接发文字说明，我会把图片连同文字一起发给当前会话——5 分钟内有效。若当前模型不支持图片输入，先发 /model 切到支持视觉的模型。`);
+    log("image ack sent", ackMid);
+  } catch (e) { log("image handle error", e?.stack ?? e?.message ?? String(e)); await sendText(chatId, `❌ 图片处理失败：${e.message}`); }
 }
 async function handleFileMessage(chatId, ev) {
+  if (seenMedia(ev.message_id)) { log("file dup ignored", ev.message_id); return; }
   const ctx = chatCtx(chatId);
   let fileKey = "", fileName = "";
   try { const c = JSON.parse(ev.content ?? "{}"); fileKey = c.file_key ?? ""; fileName = c.file_name ?? ""; } catch { }
@@ -892,9 +936,29 @@ async function runPrompt(chatId, text) {
   const ctx = chatCtx(chatId);
   if (!ACP.ready()) { await sendMarkdown(chatId, "❌ dsh ACP 服务未就绪（正在重连），请稍后再试。"); return; }
   if (!ctx.sessionId) {
-    const cwd = ctx.cwd ?? CONFIG.defaultCwd;
-    try { const s = await ACP.newSession(cwd); ctx.sessionId = s.sessionId; ctx.cwd = cwd; ctx.relay = false; saveState(); }
-    catch (e) { await sendMarkdown(chatId, `❌ 自动创建会话失败：${e?.message ?? e}`); return; }
+    const want = ctx.intendedSession;
+    if (want) {
+      // 上次切换被 Web 锁挡住：先自动重试一次，仍被占用就明确告知，绝不静默新建会话
+      const dir = sessionDirFor(want.cwd, want.sessionId);
+      const held = dir ? await flockHeld(dir + "/session.lock") : false;
+      if (!held) {
+        try { await trySwitch(chatId, want.sessionId, want.cwd); }
+        catch (e) { await sendText(chatId, explainSwitchError(e)); return; }
+      } else if (!(await tryRelaySwitch(chatId, want.sessionId, want.cwd))) {
+        const why = ctx.relayError ? `\n\nWeb 中继不可用：\`${ctx.relayError}\`` : "";
+        await sendText(chatId, `🔒 上次要切换的会话 \`${shortId(want.sessionId)}\` 仍被 Web 持有，这条消息**没有发送**（避免误写进新会话）。${why}\n\n· 发 \`/use ${shortId(want.sessionId)}\` 重试\n· 发 \`/new <路径>\` 新建会话\n· 在 Web 里归档该会话或重启 dsh web 即可释放锁`);
+        return;
+      }
+    } else {
+      const cwd = ctx.cwd ?? CONFIG.defaultCwd;
+      try {
+        const s = await ACP.newSession(cwd);
+        ctx.sessionId = s.sessionId; ctx.cwd = cwd; ctx.relay = false; ctx.intendedSession = null; saveState();
+        registerSessionInGui(s.sessionId, cwd);
+        await sendText(chatId, `ℹ️ 当前没有绑定会话，已在 \`${cwd}\` 新建 \`${shortId(s.sessionId)}\`。发 \`/new <路径>\` 可指定工作区，\`/use\` 可切换已有会话。`);
+      }
+      catch (e) { await sendMarkdown(chatId, `❌ 自动创建会话失败：${e?.message ?? e}`); return; }
+    }
   }
   if (ctx.busy) { await sendMarkdown(chatId, "⏳ 当前会话正在执行任务，请等它完成或发 `/stop` 中断。"); return; }
   const sid = ctx.sessionId; const startAt = Date.now();
@@ -902,6 +966,20 @@ async function runPrompt(chatId, text) {
   ctx.pendingImage = null;
   const files = (ctx.pendingFile ?? []).filter((f) => Date.now() - f.at < 300000);
   ctx.pendingFile = null;
+
+  // ===== 写锁检查：被其它进程持有就直接转中继，中继不可用则明确拒绝（绝不静默卡住/新建） =====
+  if (!ctx.relay && !ACP.active.has(sid)) {
+    const dir = sessionDirFor(ctx.cwd ?? CONFIG.defaultCwd, sid);
+    if (dir && await flockHeld(dir + "/session.lock")) {
+      const probe = await webControl("status");
+      if (probe.ok) { ctx.relay = true; log("lock held -> relay", shortId(sid)); saveState(); }
+      else {
+        ctx.relayError = String(probe.error ?? "web 控制端点不可达").slice(0, 160); saveState();
+        await sendText(chatId, `🔒 会话 \`${shortId(sid)}\` 正被 Web 持有写锁，而 Web 中继不可用（\`${ctx.relayError}\`），这条消息**没有发送**。\n\n· 在 Web 里归档该会话或重启 dsh web 释放锁后重发\n· 或发 \`/new <路径>\` 新建会话`);
+        return;
+      }
+    }
+  }
 
   // ===== Web 中继模式 =====
   if (ctx.relay && ACP.ready() && ACP.active.has(sid)) { ctx.relay = false; saveState(); }
@@ -1118,7 +1196,7 @@ async function handleCardAction(ev) {
       if (!dirExists(v.cwd)) { await sendText(chatId, `❌ 目录不存在：${v.cwd}`); return; }
       try {
         const s = await ACP.newSession(v.cwd);
-        ctx.sessionId = s.sessionId; ctx.cwd = v.cwd; ctx.relay = false; saveState();
+        ctx.sessionId = s.sessionId; ctx.cwd = v.cwd; ctx.relay = false; ctx.intendedSession = null; saveState();
         registerSessionInGui(s.sessionId, v.cwd);
         const card = browserWsCard(v.cwd, await annotateSessions((await mergedSessions()).filter((s2) => s2.cwd === v.cwd)), s.sessionId, `✅ 已在 **${v.cwd}** 创建会话 \`${shortId(s.sessionId)}\`，直接发消息开始。`);
         ctx.browserView = { view: "ws", cwd: v.cwd }; saveState();
@@ -1150,6 +1228,7 @@ async function handleCardAction(ev) {
           const key = `${chatId}:${v.sessionId}`;
           if (pendingTakeovers.has(key)) { await sendText(chatId, "已在等待该会话的锁释放。"); return; }
           pendingTakeovers.set(key, { chatId, sessionId: v.sessionId, cwd: v.cwd, addedAt: Date.now() });
+          ctx.intendedSession = { sessionId: v.sessionId, cwd: v.cwd }; saveState();
           const meta = readSessionMeta(v.sessionId);
           await sendText(chatId, `🔒 「${(meta.title || shortId(v.sessionId)).slice(0, 24)}」正被 Web GUI 持有，已开始监视锁——释放后自动切换。点「查看」随时可读它的聊天记录。`);
           await peekHistory(chatId, v.sessionId, v.cwd, 3);
@@ -1197,7 +1276,7 @@ async function handleCommand(chatId, cmd, arg) {
       if (arg) {
         const cwd = resolve(arg);
         if (!isAbsolute(cwd) || !dirExists(cwd)) { await sendText(chatId, `❌ 目录不存在：${cwd}`); return; }
-        try { const s = await ACP.newSession(cwd); ctx.sessionId = s.sessionId; ctx.cwd = cwd; ctx.relay = false; saveState(); registerSessionInGui(s.sessionId, cwd); await sendText(chatId, `✅ 已在 **${cwd}** 创建会话 \`${shortId(s.sessionId)}\`。直接发消息即可开始。`); } catch (e) { await sendText(chatId, `❌ 创建会话失败：${e?.message ?? e}`); }
+        try { const s = await ACP.newSession(cwd); ctx.sessionId = s.sessionId; ctx.cwd = cwd; ctx.relay = false; ctx.intendedSession = null; saveState(); registerSessionInGui(s.sessionId, cwd); await sendText(chatId, `✅ 已在 **${cwd}** 创建会话 \`${shortId(s.sessionId)}\`。直接发消息即可开始。`); } catch (e) { await sendText(chatId, `❌ 创建会话失败：${e?.message ?? e}`); }
       } else await sendCard(chatId, pickerCard(await recentWorkspaces()));
       return;
     case "sessions": case "工作区会话": case "浏览": case "list": case "列表": case "会话": {
@@ -1216,7 +1295,13 @@ async function handleCommand(chatId, cmd, arg) {
         if (dir && await flockHeld(dir + "/session.lock")) {
           if (await tryRelaySwitch(chatId, target.sessionId, target.cwd)) return;
           const key = `${chatId}:${target.sessionId}`;
-          if (!pendingTakeovers.has(key)) { pendingTakeovers.set(key, { chatId, sessionId: target.sessionId, cwd: target.cwd, addedAt: Date.now() }); const meta = readSessionMeta(target.sessionId); await sendText(chatId, `🔒 「${(meta.title || shortId(target.sessionId)).slice(0, 24)}」正被 Web 持有，已开始监视锁——释放后自动切换。`); }
+          ctx.intendedSession = { sessionId: target.sessionId, cwd: target.cwd }; saveState();
+          if (!pendingTakeovers.has(key)) {
+            pendingTakeovers.set(key, { chatId, sessionId: target.sessionId, cwd: target.cwd, addedAt: Date.now() });
+            const meta = readSessionMeta(target.sessionId);
+            const why = ctx.relayError ? `\nWeb 中继不可用：\`${ctx.relayError}\`` : "";
+            await sendText(chatId, `🔒 「${(meta.title || shortId(target.sessionId)).slice(0, 24)}」正被 Web 持有，已开始监视锁——释放后自动切换。${why}`);
+          }
           return;
         }
       }
@@ -1241,7 +1326,12 @@ async function handleCommand(chatId, cmd, arg) {
       const hits = flat.filter((o) => (`${o.group} ${o.name}`.toLowerCase().includes(kw)) || o.value.toLowerCase().includes(kw));
       if (hits.length === 0) { await sendText(chatId, `❌ 没有匹配「${arg}」的模型。`); return; }
       if (hits.length > 1) { await sendText(chatId, `⚠️ 匹配到多个：${hits.map((o) => o.name).join("、")}`); return; }
-      try { await ACP.setConfigOption(ctx.sessionId, "model", hits[0].value); await sendText(chatId, `✅ 模型已切换为 **${hits[0].name}**（下一个任务生效）`); } catch (e) { await sendText(chatId, `❌ ${e?.message ?? e}`); }
+      try {
+        await ACP.setConfigOption(ctx.sessionId, "model", hits[0].value);
+        const m2 = (ACP.getConfigOptions(ctx.sessionId) ?? []).find((o) => o.id === "model");
+        const okNow = m2?.currentValue === hits[0].value;
+        await sendText(chatId, okNow ? `✅ 模型已切换为 **${hits[0].name}**（下一个任务生效）` : `⚠️ 已提交切换，但服务端当前值仍为 \`${m2?.currentValue ?? "未知"}\`，请再试或用 /model 卡片确认。`);
+      } catch (e) { await sendText(chatId, `❌ 切换失败：${e?.message ?? e}`); }
       return;
     }
     case "effort": case "深度": case "思考": case "思考深度": {
@@ -1282,6 +1372,7 @@ async function handleCommand(chatId, cmd, arg) {
     case "cancel-takeover": case "取消接管": {
       let n = 0;
       for (const [key, t] of [...pendingTakeovers]) if (t.chatId === chatId) { pendingTakeovers.delete(key); n++; }
+      ctx.intendedSession = null; saveState();
       await sendText(chatId, n ? `已取消 ${n} 个接管等待。` : "没有等待中的接管。");
       return;
     }

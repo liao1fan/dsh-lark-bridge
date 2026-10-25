@@ -168,6 +168,7 @@ cat > "$CONFIG_FILE" << CONFIGEOF
 {
   "allowUsers": $ALLOW_USERS,
   "defaultCwd": "$HOME",
+  "defaultModel": "${DSH_DEFAULT_MODEL:-}",
   "maxListItems": 20,
   "firstStatusDelayMs": 12000,
   "statusIntervalMs": 10000,

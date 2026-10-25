@@ -59,6 +59,6 @@ bash dsh-lark-bridge/install.sh
 |---|---|
 | 发消息没反应 | `tail bridge.log` 看是否收到事件；检查 lark-cli 认证 |
 | 卡片按钮没反应 | 确认飞书开发者后台已启用事件回调（长连接模式） |
-| 图片报"不支持" | 当前模型是纯文本模型，发 /model 切到支持视觉的模型 |
+| 图片报"不支持" | 会话模型是纯文本模型，发 /model 切换；若是 `inline image prompts were not advertised`，说明 ACP profile 默认模型不支持读图（改 profile 的 provider/model 后重启 bridge） |
 | Web 中继不可用 | 重启 dsh web 加载新版插件；检查 token 文件存在 |
 | bridge 反复重启 | 查看日志中的 ERR_MODULE_NOT_FOUND，确认 dsh 安装完整 |

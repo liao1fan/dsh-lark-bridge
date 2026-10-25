@@ -1,6 +1,7 @@
 {
   "allowUsers": ["ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"],
   "defaultCwd": "/home/yourname",
+  "defaultModel": "",
   "maxListItems": 20,
   "firstStatusDelayMs": 12000,
   "statusIntervalMs": 10000,

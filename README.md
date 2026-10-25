@@ -76,6 +76,7 @@ bash dsh-lark-bridge/install.sh
 |---|---|
 | `allowUsers` | 允许使用的飞书 `open_id` 白名单，其他用户消息一律忽略 |
 | `defaultCwd` | 新建会话的默认工作目录 |
+| `defaultModel` | 新会话默认使用的模型（按名字/值模糊匹配，如 `coding`）；留空则用 ACP profile 的默认模型 |
 | `testChats` | 测试群 `chat_id`，用于隔离自测 |
 | `poll.chats` | 事件流之外的轮询兜底群/私聊（bot 在群里默认只收 @ 消息） |
 | `stream.intervalMs` | 流式卡片刷新间隔 |
@@ -88,11 +89,19 @@ bash dsh-lark-bridge/install.sh
 
 安装脚本不会写死任何模型网关：ACP profile 里已有的 `provider`/`model` 会原样保留；需要指定时用 `DSH_ACP_PROVIDER`、`DSH_ACP_MODEL` 环境变量，两者都没有则跳过这一步。
 
+## 图片 / 文件
+
+上传图片后发文字，图片会作为附件随任务提交。注意两点：
+
+1. **ACP profile 的默认模型必须是能读图的模型**（例如视觉模型）。dsh 在 ACP 初始化时按 profile 里配置的 provider/model 声明「是否支持内联图片」，声明为否时任何图片都会被拒绝（`inline image prompts were not advertised by this connection`）。可用 `DSH_ACP_PROVIDER` / `DSH_ACP_MODEL` 指定。
+2. **会话本身的模型也要能读图**。`defaultModel` 决定新会话用哪个模型；纯文本模型发图会收到「当前模型不支持图片输入」的提示，发 `/model` 可切换。
+
 ## 工作原理
 
 - **ACP 连接**：`dsh --profile acp` 走 JSON-RPC over stdio；桥接使用 `session/new|list|resume|prompt|cancel|set_config_option`
 - **会话读写**：直接读取 `~/.dsh/sessions/<container>/<id>/session.v3.jsonl.zstd`（只读打开，不抢写锁）
 - **单写者锁**：同一会话同一时间只允许一个前端写入；锁由 dsh 进程持有，桥接通过探测 `session.lock` 判断归属
+- **不会悄悄串会话**：切换被锁挡住时桥接会记住目标会话，下条消息先自动重试；仍被占用就明确拒发并说明原因（不会另建新会话把内容写丢）
 - **Web 中继**：桥接挂载的 web 插件暴露 `/bridge-control`（仅回环 + token 鉴权），由持有锁的 web 进程代为 `prompt`
 - **流式卡片**：Card 2.0 streaming 模式 + cardkit 文本元素增量更新；超过 10 分钟自动重开流式，避免 `300309`
 
