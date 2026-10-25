@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 // Token 路径优先级：环境变量 > dsh-lark-bridge 标准路径
+// 注意：dsh web 的 sessionController.prompt 走 attachments.admitPromptContent，
+// 其 image 块字段是 mediaType；而 ACP session/prompt 的线格式是 mimeType。两处不能混用。
 const TOKEN_PATH = process.env.DSH_BRIDGE_TOKEN_FILE
 	?? join(homedir(), ".dsh", "dsh-lark-bridge", "config", "web-control-token");
 
@@ -58,7 +60,7 @@ function apply(ctx) {
 						if (typeof sessionId !== "string" || typeof text !== "string" || !text.trim()) return send(400, { ok: false, error: "sessionId and non-empty text required" });
 						const content = [];
 						if (image && typeof image.mediaType === "string" && typeof image.data === "string") {
-							content.push({ type: "image", data: image.data, mimeType: image.mediaType });
+							content.push({ type: "image", data: image.data, mediaType: image.mediaType });
 						}
 						content.push({ type: "text", text });
 						const accepted = await c.sessionController.prompt({ requestId: randomUUID(), sessionId, mode: "queue", content }, AbortSignal.timeout(15000));

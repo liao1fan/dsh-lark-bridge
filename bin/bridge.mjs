@@ -425,7 +425,11 @@ function sessionDirFor(cwd, sessionId) {
   }
   return null;
 }
+const registeredInWeb = new Set();
 async function registerSessionInGui(sessionId, cwd) {
+  if (registeredInWeb.has(sessionId)) return;
+  registeredInWeb.add(sessionId);
+  if (registeredInWeb.size > 500) registeredInWeb.delete(registeredInWeb.values().next().value);
   // 先让 web 进程通过服务 API 挂进内存注册表（重启后侧边栏立刻可见）
   try {
     const r = await webControl("register", { sessionId, cwd });
@@ -926,7 +930,7 @@ async function handleFileMessage(chatId, ev) {
     await sendText(chatId, `📎 已收到文件 **${fileName}**（${Math.round(stat.size / 1024)}KB），已保存到 \`${path}\`\n\n直接发文字说明要怎么处理，我会把文件路径一起传给会话。5 分钟内有效。`);
   } catch (e) { await sendText(chatId, `❌ 文件处理失败：${e.message}`); }
 }
-const imageUnsupported = (msg) => /does not support image|MODEL_DOES_NOT_SUPPORT_IMAGES|image input|attachment-invalid|不支持图片/i.test(String(msg));
+const imageUnsupported = (msg) => /does not support image|MODEL_DOES_NOT_SUPPORT_IMAGES|image input|attachment-invalid|not accepted by this deployment|不支持图片/i.test(String(msg));
 // 当前会话的模型展示名（不写死任何具体模型 / 网关名）
 function currentModelLabel(sessionId) {
   try {
