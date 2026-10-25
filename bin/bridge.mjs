@@ -1012,8 +1012,8 @@ async function runPrompt(chatId, text) {
     if (files.length) relayText = `（用户上传了文件：${files.map((f) => `${f.name} 在 ${f.path}`).join("、")}）\n\n${text}`;
     const sendPayload = { sessionId: sid, text: relayText };
     if (img) {
-      if ((probe.version ?? 0) >= 3) sendPayload.image = { mediaType: img.mediaType, data: img.data };
-      else await sendText(chatId, "⚠️ 中继模式图片支持需要 web 侧插件为 v3（重启 dsh web 后生效），本次仅发送文字。");
+      if ((probe.version ?? 0) >= 4) sendPayload.image = { mediaType: img.mediaType, data: img.data };
+      else await sendText(chatId, `⚠️ web 侧插件是 v${probe.version ?? "?"}：中继模式图片需要 v4（重启 dsh web 生效），本次仅发送文字。`);
     }
     const r = await webControl("send", sendPayload);
     const errStr = String(r.error ?? "") + " " + JSON.stringify(r);

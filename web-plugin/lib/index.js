@@ -1,7 +1,7 @@
 /**
  * dsh-bridge-control — 飞书桥的 web 内嵌控制端点（仅本机回环 + token 鉴权）。
  * POST /bridge-control (X-Bridge-Token)
- *   {"action":"status"}  -> {ok, held:[{sessionId,cwd}], version:3}
+ *   {"action":"status"}  -> {ok, held:[{sessionId,cwd}], version:4, imageBlockField:"mediaType"}
  *   {"action":"register",sessionId,cwd} -> 把 ACP 新建的会话挂进 web 侧边栏
  *   {"action":"send",...} -> {ok, accepted}
  *   {"action":"cancel",..}-> {ok, accepted}
@@ -43,7 +43,7 @@ function apply(ctx) {
 					const { action, sessionId, cwd, text, image } = JSON.parse(body || "{}");
 					if (action === "status") {
 						const held = c.agents.list().map((a) => ({ sessionId: a.session.id, cwd: a.session.header.cwd }));
-						return send(200, { ok: true, held, version: 3 });
+						return send(200, { ok: true, held, version: 4, imageBlockField: "mediaType" });
 					}
 					// 让 web 侧边栏立刻认识由 ACP（bridge）新建的会话：
 					// web 的 workspace 注册表是进程内快照，外部改 workspace.json 它看不到，必须走服务 API
