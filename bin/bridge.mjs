@@ -1112,6 +1112,7 @@ async function handleCardAction(ev) {
       const modelVal = (form.model ?? "").trim(); const effortVal = (form.effort ?? "").trim();
       if (!modelVal && !effortVal) { await sendText(chatId, "❌ 请先选择模型或思考深度。"); return; }
       try {
+        await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd);
         let applied = [];
         if (modelVal) { await ACP.setConfigOption(ctx.sessionId, "model", modelVal); const co = ACP.getConfigOptions(ctx.sessionId) ?? []; const m = co.find((o) => o.id === "model"); let name = modelVal; for (const g of m?.options ?? []) for (const o of g.options ?? []) if (o.value === modelVal) name = `${g.group ?? g.name} · ${o.name}`; applied.push(`模型 → **${name}**`); }
         if (effortVal) { await ACP.setConfigOption(ctx.sessionId, "reasoning_effort", effortVal); applied.push(`思考深度 → **${effortVal === "" ? "默认" : effortVal}**`); }
@@ -1320,6 +1321,7 @@ async function handleCommand(chatId, cmd, arg) {
       if (!ctx.sessionId) { await sendText(chatId, "当前没有会话。"); return; }
       if (!ACP.ready()) { await sendText(chatId, "❌ dsh ACP 未就绪。"); return; }
       if (!arg) { try { await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd); await sendCard(chatId, modelSettingsCard(ACP.getConfigOptions(ctx.sessionId), ctx.sessionId)); } catch (e) { await sendText(chatId, `❌ ${e?.message ?? e}`); } return; }
+      try { await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd); } catch (e) { await sendText(chatId, `❌ 会话激活失败：${e?.message ?? e}`); return; }
       const co = ACP.getConfigOptions(ctx.sessionId); const m = (co ?? []).find((o) => o.id === "model"); const flat = [];
       for (const g of m?.options ?? []) for (const o of g.options ?? []) flat.push({ group: g.group ?? g.name, name: o.name, value: o.value });
       const kw = arg.toLowerCase();
