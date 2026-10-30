@@ -334,7 +334,25 @@ const shortId = (sid) => (sid ?? "").replace(/^session-/, "").slice(0, 8);
 const tailCache = new Map();
 const runningSet = new Set();
 const chatBusyBySession = new Map();
-function sessionLogStat(cwd, sessionId) { const dir = sessionDirFor(cwd, sessionId); if (!dir) return null; try { return statSync(dir + "/session.v3.jsonl.zstd"); } catch { return null; } }
+// dsh 会随版本升级会话日志格式（v3 -> v4 ...），同目录里只保留最新一份。
+// 解析成"版本号最高的 session.v{N}.jsonl.zstd"，否则会一直盯着旧的 v3 文件（mtime 不变 → 状态缓存永不失效）。
+const logFileCache = new Map();
+function sessionLogFile(dir) {
+  const hit = logFileCache.get(dir);
+  if (hit && Date.now() - hit.at < 5000) return hit.name ? `${dir}/${hit.name}` : null;
+  let best = null, bestV = -1;
+  try {
+    for (const n of readdirSync(dir)) {
+      const m = /^session\.v(\d+)\.jsonl\.zstd$/.exec(n);
+      if (!m) continue;
+      const v = Number(m[1]);
+      if (v > bestV) { bestV = v; best = n; }
+    }
+  } catch { }
+  logFileCache.set(dir, { at: Date.now(), name: best });
+  return best ? `${dir}/${best}` : null;
+}
+function sessionLogStat(cwd, sessionId) { const dir = sessionDirFor(cwd, sessionId); if (!dir) return null; const f = sessionLogFile(dir); if (!f) return null; try { return statSync(f); } catch { return null; } }
 function deriveTurnStatus(events) {
   let turnStartIdx = -1;
   for (let i = events.length - 1; i >= 0; i--) { if (events[i].type === "turn/start") { turnStartIdx = i; break; } }
@@ -357,8 +375,11 @@ function deriveTurnStatus(events) {
   }
   return { running, startedAt: events[turnStartIdx].time ?? null, prompt, steps, lastActivity, endReason };
 }
+const formatLogged = new Map();
 async function sessionTurnStatus(sessionId, cwd) {
   const st = sessionLogStat(cwd, sessionId); if (!st) return null;
+  { const f = sessionLogFile(sessionDirFor(cwd, sessionId) ?? ""); const v = f ? (/\.v(\d+)\./.exec(f)?.[1] ?? "?") : "?";
+    if (formatLogged.get(sessionId) !== v) { formatLogged.set(sessionId, v); log("session log format", shortId(sessionId), "v" + v); } }
   const key = `${st.mtimeMs}:${st.size}`;
   const cached = tailCache.get(sessionId); const isRunning = runningSet.has(sessionId);
   if (cached && cached.key === key) return cached.status;
@@ -420,7 +441,7 @@ function sessionDirFor(cwd, sessionId) {
   for (const idc of [sessionId, sessionId.replace(/^session-/, "")]) {
     for (const name of sessionContainers()) {
       const dir = `${DSH_SESSIONS_ROOT}/${name}/${idc}`;
-      if (existsSync(dir + "/session.v3.jsonl.zstd") || existsSync(dir + "/session.lock")) return dir;
+      if (sessionLogFile(dir) || existsSync(dir + "/session.lock")) return dir;
     }
   }
   return null;
@@ -500,14 +521,28 @@ async function relayPromptTurn(chatId, sid, cwd, sc, startAt) {
   const meta = readSessionMeta(sid); const title = (meta.title || shortId(sid)).slice(0, 30);
   const sb = new StreamBuf(sc);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // 关键：必须等到「本次」turn 落地（startedAt >= 发起时间），否则会读到上一轮的
+  // 旧状态并立刻把旧回复当成结果推给用户（中继模式下飞书看到旧回复的根因）。
+  const wantStart = startAt - 3000;
+  const isOurs = (s) => !!s && s.startedAt != null && s.startedAt >= wantStart;
   let st = null;
-  for (let i = 0; i < 4; i++) { st = await sessionTurnStatus(sid, cwd); if (st?.prompt) break; await sleep(2500); }
-  sb.seed(`🔗 **Web 中继** · ${title}\n\n🗣 ${st?.prompt ?? "…"}`);
+  for (let i = 0; i < 12; i++) { st = await sessionTurnStatus(sid, cwd); if (isOurs(st)) break; await sleep(2500); }
+  sb.seed(`🔗 **Web 中继** · ${title}\n\n🗣 ${isOurs(st) ? (st.prompt || "…") : "（等待 Web 侧开始执行…）"}`);
   await sb.flush();
-  let seen = 0;
+  let seen = 0; let waited = 0;
   for (;;) {
     st = await sessionTurnStatus(sid, cwd);
-    if (!st) { await sleep(2500); continue; }
+    if (!isOurs(st)) {
+      // 还没看到本次 turn：先等，超过 5 分钟才放弃（避免把旧回复当结果）
+      if (!st) { await sleep(2500); continue; }
+      waited += 2500;
+      if (waited > 300000) {
+        sb.append("\n\n⚠️ 等待 Web 侧执行超时：本次 turn 没有出现在会话日志里（可能是模型路由/锁问题，看 bridge.log）。");
+        await sb.flush();
+        return { answer: "", stopped: false, full: sb.full };
+      }
+      await sleep(2500); continue;
+    }
     if (st.prompt && sb.pushed !== null && !sb.full.includes(st.prompt)) sb.append(`\n\n🗣 ${st.prompt}`);
     for (; seen < (st.steps?.length ?? 0); seen++) {
       const s = st.steps[seen];
