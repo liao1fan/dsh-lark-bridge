@@ -49,12 +49,15 @@ function apply(ctx) {
 					}
 					// 中继会话的模型设置：ACP 侧拿不到写锁，必须由 web 进程代理
 					if (action === "models") {
-						const llm = c.get?.("llm") ?? ctx.get?.("llm");
+						const llm = c.get?.("llm") ?? ctx.get?.("llm") ?? c.llm ?? ctx.llm;
 						if (!llm) return send(503, { ok: false, error: "llm service unavailable" });
-						const agents = c.agents.list();
+						const agents = c.agents ?? c.get?.("agents") ?? ctx.get?.("agents");
 						const want = String(sessionId ?? "").replace(/^session-/, "");
-						const agent = agents.find((a) => a.session.id === sessionId || a.session.id.replace(/^session-/, "") === want);
-						const current = agent ? c.agents.selectionFor(agent).current : null;
+						let current = null;
+						try {
+							const agent = agents?.list?.().find((a) => a.session.id === sessionId || a.session.id.replace(/^session-/, "") === want);
+							if (agent && agents?.selectionFor) current = agents.selectionFor(agent).current ?? null;
+						} catch { /* 取不到当前选择也能返回目录 */ }
 						const groups = [];
 						for (const provider of llm.listProviders()) {
 							try {
