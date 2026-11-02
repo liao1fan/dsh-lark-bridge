@@ -809,6 +809,14 @@ function pickerDoneCard(cwd, sessionId) {
     { tag: "button", text: { tag: "plain_text", content: "← 返回控制台" }, type: "text", size: "small", width: "fill", behaviors: [{ type: "callback", value: { do: "home" } }] },
   ] } };
 }
+// 中继标记已过期（web 不再持有该会话）时，主动退回原生 ACP，避免一直用 web 目录
+async function maybeReleaseRelay(ctx) {
+  if (!ctx?.relay || !ctx.sessionId || !ACP.ready()) return;
+  const dir = sessionDirFor(ctx.cwd ?? CONFIG.defaultCwd, ctx.sessionId);
+  const held = dir ? await flockHeld(dir + "/session.lock") : false;
+  if (held) return;
+  try { await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd); ctx.relay = false; saveState(); log("relay released", shortId(ctx.sessionId)); } catch { }
+}
 // 中继会话（web 持有写锁）取模型目录/当前选择：ACP 侧 resume 会被拒，只能问 web 进程
 async function relayModelState(sessionId) {
   const r = await webControl("models", { sessionId });
@@ -824,6 +832,7 @@ async function relayModelState(sessionId) {
   const efforts = (r.efforts ?? []).map((e) => ({ name: e.name ?? e.id, value: e.id }));
   return {
     current: cur,
+    note: cur.provider ? null : "Web 侧尚未加载该会话（重启 web 后会这样）：选择后提交即可生效。",
     configOptions: [
       { id: "model", currentValue: cur.provider && cur.model ? JSON.stringify([cur.provider, cur.model]) : "", options },
       { id: "reasoning_effort", currentValue: cur.reasoningEffort ?? "", options: [{ name: "跟随提供商默认", value: "" }, ...efforts] },
@@ -834,14 +843,14 @@ async function relaySelectModel(sessionId, provider, model, reasoningEffort) {
   const r = await webControl("selectModel", { sessionId, provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) });
   return r?.ok ? r.selected ?? null : null;
 }
-function modelSettingsCard(configOptions, sessionId, done) {
+function modelSettingsCard(configOptions, sessionId, done, note) {
   const model = (configOptions ?? []).find((o) => o.id === "model");
   const effort = (configOptions ?? []).find((o) => o.id === "reasoning_effort");
   const currentModel = model?.currentValue ?? ""; let currentModelName = currentModel; const flat = [];
   for (const g of model?.options ?? []) for (const o of g.options ?? []) { flat.push({ group: g.group ?? g.name, name: o.name, value: o.value }); if (o.value === currentModel) currentModelName = `${g.group ?? g.name} · ${o.name}`; }
   const effName = (v) => v === "" ? "跟随提供商默认" : v;
   const els = [
-    { tag: "markdown", content: `当前模型：**${currentModelName}**\n思考深度：**${effName(effort?.currentValue ?? "")}**\n\n修改后从下一个任务开始生效。` },
+    { tag: "markdown", content: `当前模型：**${currentModelName || "未加载"}**\n思考深度：**${effName(effort?.currentValue ?? "")}**\n\n修改后从下一个任务开始生效。${note ? `\n\nℹ️ ${note}` : ""}` },
     { tag: "form", name: "cfgform", elements: [
       { tag: "select_static", name: "model", placeholder: { tag: "plain_text", content: "选择模型" }, initial_option: currentModel || undefined, options: flat.map((o) => ({ text: { tag: "plain_text", content: `${o.group} · ${o.name}` }, value: o.value })) },
       { tag: "select_static", name: "effort", placeholder: { tag: "plain_text", content: "选择思考深度" }, initial_option: effort?.currentValue ?? "", options: (effort?.options ?? [{ value: "", name: "Provider default" }, { value: "low" }, { value: "high" }, { value: "max" }]).map((o) => ({ text: { tag: "plain_text", content: effName(o.value ?? o) }, value: o.value ?? o })) },
@@ -1232,11 +1241,12 @@ async function handleCardAction(ev) {
     if (v.do === "home" || v.do === "status") { await render(panelCard(ctx)); return; }
     if (v.do === "modelcfg") {
       if (!ctx.sessionId) { await sendText(chatId, "❌ 当前没有会话。"); return; }
+      await maybeReleaseRelay(ctx);
       if (ctx.relay) {
         // 中继会话：ACP resume 会被写锁拒绝，改由 web 进程提供目录并设置
         const st = await relayModelState(ctx.sessionId);
         if (!st) { await sendText(chatId, "❌ 取模型列表失败：Web 侧不可用或插件版本过旧（需要 v5，重启 `dsh web` 生效）。"); return; }
-        const card = modelSettingsCard(st.configOptions, ctx.sessionId);
+        const card = modelSettingsCard(st.configOptions, ctx.sessionId, false, st.note);
         if (!(await render(card))) await sendCard(chatId, card);
         return;
       }
@@ -1411,6 +1421,7 @@ async function handleCommand(chatId, cmd, arg) {
     case "status": case "状态": await sendText(chatId, `**当前会话**：${ctx.sessionId ? `\`${shortId(ctx.sessionId)}\`` : "无"}\n**工作区**：\`${ctx.cwd ?? CONFIG.defaultCwd}\`\n**状态**：${ctx.busy ? "⏳ 执行中" : "空闲"}${ctx.relay ? " · 🔗Web中继" : ""}\n\n发 \`/panel\` 获取面板，\`/list\` 查看全部会话。`); return;
     case "model": case "模型": {
       if (!ctx.sessionId) { await sendText(chatId, "当前没有会话。"); return; }
+      await maybeReleaseRelay(ctx);
       if (!ACP.ready()) { await sendText(chatId, "❌ dsh ACP 未就绪。"); return; }
       if (!arg) {
         if (ctx.relay) {
