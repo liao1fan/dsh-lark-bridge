@@ -818,10 +818,25 @@ async function maybeReleaseRelay(ctx) {
   try { await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd); ctx.relay = false; saveState(); log("relay released", shortId(ctx.sessionId)); } catch { }
 }
 // 中继会话（web 持有写锁）取模型目录/当前选择：ACP 侧 resume 会被拒，只能问 web 进程
+async function lastSessionModel(sessionId) {
+  try {
+    const ev = await readSessionEvents(sessionId);
+    for (let i = ev.length - 1; i >= 0; i--) {
+      const e = ev[i];
+      if (e?.type === "request/context") { const d = e.data ?? {}; if (d.provider && d.model) return { provider: d.provider, model: d.model }; }
+    }
+  } catch (e) { log("lastSessionModel failed", e?.message); }
+  return null;
+}
 async function relayModelState(sessionId) {
   const r = await webControl("models", { sessionId });
   if (!r?.ok) { log("relayModelState failed:", String(r?.error ?? "unknown").slice(0, 120)); return null; }
-  const cur = r.current ?? {};
+  let cur = r.current ?? {};
+  let guessed = false;
+  if (!cur.provider || !cur.model) {
+    const hint = await lastSessionModel(sessionId);
+    if (hint) { cur = hint; guessed = true; }
+  }
   const byGroup = new Map();
   for (const g of r.groups ?? []) for (const m of g.models ?? []) {
     const group = g.name ?? g.provider;
@@ -829,10 +844,12 @@ async function relayModelState(sessionId) {
     byGroup.get(group).push({ name: m.name ?? m.id, value: JSON.stringify([g.provider, m.id]) });
   }
   const options = [...byGroup].map(([group, opts]) => ({ group, options: opts }));
-  const efforts = (r.efforts ?? []).map((e) => ({ name: e.name ?? e.id, value: e.id }));
+  let efforts = (r.efforts ?? []).map((e) => ({ name: e.name ?? e.id, value: e.id }));
+  // web 没返回思考深度档位时（例如 Web 进程未加载该会话）给通用档位，避免下拉框只剩「跟随提供商默认」
+  if (!efforts.length) efforts = [{ name: "low", value: "low" }, { name: "high", value: "high" }, { name: "max", value: "max" }];
   return {
     current: cur,
-    note: cur.provider ? null : "Web 侧尚未加载该会话（重启 web 后会这样）：选择后提交即可生效。",
+    note: cur.provider ? (guessed ? "模型取自该会话最近一次请求；改动会从下个任务生效。" : null) : "Web 侧尚未加载该会话：选择后提交即可生效。",
     configOptions: [
       { id: "model", currentValue: cur.provider && cur.model ? JSON.stringify([cur.provider, cur.model]) : "", options },
       { id: "reasoning_effort", currentValue: cur.reasoningEffort ?? "", options: [{ name: "跟随提供商默认", value: "" }, ...efforts] },
