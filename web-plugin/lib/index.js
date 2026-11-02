@@ -1,8 +1,10 @@
 /**
  * dsh-bridge-control — 飞书桥的 web 内嵌控制端点（仅本机回环 + token 鉴权）。
  * POST /bridge-control (X-Bridge-Token)
- *   {"action":"status"}  -> {ok, held:[{sessionId,cwd}], version:4, imageBlockField:"mediaType"}
+ *   {"action":"status"}  -> {ok, held:[{sessionId,cwd}], version:5, imageBlockField:"mediaType"}
  *   {"action":"register",sessionId,cwd} -> 把 ACP 新建的会话挂进 web 侧边栏
+ *   {"action":"models","sessionId"}   -> 模型目录 + 当前选择（中继会话用）
+ *   {"action":"selectModel",sessionId,provider,model,reasoningEffort?} -> 中继会话切模型
  *   {"action":"send",...} -> {ok, accepted}
  *   {"action":"cancel",..}-> {ok, accepted}
  */
@@ -43,7 +45,42 @@ function apply(ctx) {
 					const { action, sessionId, cwd, text, image } = JSON.parse(body || "{}");
 					if (action === "status") {
 						const held = c.agents.list().map((a) => ({ sessionId: a.session.id, cwd: a.session.header.cwd }));
-						return send(200, { ok: true, held, version: 4, imageBlockField: "mediaType" });
+						return send(200, { ok: true, held, version: 5, imageBlockField: "mediaType" });
+					}
+					// 中继会话的模型设置：ACP 侧拿不到写锁，必须由 web 进程代理
+					if (action === "models") {
+						const llm = c.get?.("llm") ?? ctx.get?.("llm");
+						if (!llm) return send(503, { ok: false, error: "llm service unavailable" });
+						const agents = c.agents.list();
+						const want = String(sessionId ?? "").replace(/^session-/, "");
+						const agent = agents.find((a) => a.session.id === sessionId || a.session.id.replace(/^session-/, "") === want);
+						const current = agent ? c.agents.selectionFor(agent).current : null;
+						const groups = [];
+						for (const provider of llm.listProviders()) {
+							try {
+								const models = await llm.listModels(provider.id);
+								groups.push({
+									provider: provider.id, name: provider.name ?? provider.id,
+									models: models.map((m) => ({ id: m.id, name: m.name ?? m.id })),
+								});
+							} catch { /* 单个 provider 失败不影响其它 */ }
+						}
+						let efforts = [];
+						try {
+							const sel = current ?? {};
+							if (sel.provider && sel.model) {
+								const info = await llm.resolveModelInfo(sel.provider, sel.model);
+								efforts = (info?.reasoning?.efforts ?? []).map((e) => ({ id: e.id, name: e.name ?? e.id }));
+							}
+						} catch { }
+						return send(200, { ok: true, current: current ?? null, groups, efforts, version: 5 });
+					}
+					if (action === "selectModel") {
+						const { provider, model, reasoningEffort } = JSON.parse(body || "{}");
+						if (typeof sessionId !== "string" || typeof provider !== "string" || typeof model !== "string") return send(400, { ok: false, error: "sessionId, provider, model required" });
+						const req = { sessionId, provider, model, ...(typeof reasoningEffort === "string" && reasoningEffort !== "" ? { reasoningEffort } : {}) };
+						const result = await c.sessionController.selectModel(req);
+						return send(200, { ok: true, selected: result?.selected ?? null });
 					}
 					// 让 web 侧边栏立刻认识由 ACP（bridge）新建的会话：
 					// web 的 workspace 注册表是进程内快照，外部改 workspace.json 它看不到，必须走服务 API

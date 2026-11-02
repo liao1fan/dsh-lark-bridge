@@ -809,6 +809,31 @@ function pickerDoneCard(cwd, sessionId) {
     { tag: "button", text: { tag: "plain_text", content: "← 返回控制台" }, type: "text", size: "small", width: "fill", behaviors: [{ type: "callback", value: { do: "home" } }] },
   ] } };
 }
+// 中继会话（web 持有写锁）取模型目录/当前选择：ACP 侧 resume 会被拒，只能问 web 进程
+async function relayModelState(sessionId) {
+  const r = await webControl("models", { sessionId });
+  if (!r?.ok) { log("relayModelState failed:", String(r?.error ?? "unknown").slice(0, 120)); return null; }
+  const cur = r.current ?? {};
+  const byGroup = new Map();
+  for (const g of r.groups ?? []) for (const m of g.models ?? []) {
+    const group = g.name ?? g.provider;
+    if (!byGroup.has(group)) byGroup.set(group, []);
+    byGroup.get(group).push({ name: m.name ?? m.id, value: JSON.stringify([g.provider, m.id]) });
+  }
+  const options = [...byGroup].map(([group, opts]) => ({ group, options: opts }));
+  const efforts = (r.efforts ?? []).map((e) => ({ name: e.name ?? e.id, value: e.id }));
+  return {
+    current: cur,
+    configOptions: [
+      { id: "model", currentValue: cur.provider && cur.model ? JSON.stringify([cur.provider, cur.model]) : "", options },
+      { id: "reasoning_effort", currentValue: cur.reasoningEffort ?? "", options: [{ name: "跟随提供商默认", value: "" }, ...efforts] },
+    ],
+  };
+}
+async function relaySelectModel(sessionId, provider, model, reasoningEffort) {
+  const r = await webControl("selectModel", { sessionId, provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) });
+  return r?.ok ? r.selected ?? null : null;
+}
 function modelSettingsCard(configOptions, sessionId, done) {
   const model = (configOptions ?? []).find((o) => o.id === "model");
   const effort = (configOptions ?? []).find((o) => o.id === "reasoning_effort");
@@ -1157,6 +1182,19 @@ async function handleCardAction(ev) {
       if (!ACP.ready()) { await sendText(chatId, "❌ dsh ACP 未就绪。"); return; }
       const modelVal = (form.model ?? "").trim(); const effortVal = (form.effort ?? "").trim();
       if (!modelVal && !effortVal) { await sendText(chatId, "❌ 请先选择模型或思考深度。"); return; }
+      if (ctx.relay) {
+        const st = await relayModelState(ctx.sessionId);
+        const cur = st?.current ?? {};
+        let provider = cur.provider, model = cur.model;
+        if (modelVal) { try { const p = JSON.parse(modelVal); if (Array.isArray(p) && p.length === 2) { provider = p[0]; model = p[1]; } } catch { } }
+        if (!provider || !model) { await sendText(chatId, "❌ 无法确定要切换到哪个模型（Web 侧没返回当前选择）。"); return; }
+        const picked = await relaySelectModel(ctx.sessionId, provider, model, effortVal === "" ? "" : effortVal || undefined);
+        if (!picked) { await sendText(chatId, "❌ 设置失败：Web 侧拒绝了本次修改（看 bridge.log）。"); return; }
+        const st2 = await relayModelState(ctx.sessionId);
+        const card = modelSettingsCard(st2?.configOptions ?? [], ctx.sessionId, true);
+        if (!(await updateCard(token, card))) await sendCard(chatId, card);
+        return;
+      }
       try {
         await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd);
         let applied = [];
@@ -1194,6 +1232,14 @@ async function handleCardAction(ev) {
     if (v.do === "home" || v.do === "status") { await render(panelCard(ctx)); return; }
     if (v.do === "modelcfg") {
       if (!ctx.sessionId) { await sendText(chatId, "❌ 当前没有会话。"); return; }
+      if (ctx.relay) {
+        // 中继会话：ACP resume 会被写锁拒绝，改由 web 进程提供目录并设置
+        const st = await relayModelState(ctx.sessionId);
+        if (!st) { await sendText(chatId, "❌ 取模型列表失败：Web 侧不可用或插件版本过旧（需要 v5，重启 `dsh web` 生效）。"); return; }
+        const card = modelSettingsCard(st.configOptions, ctx.sessionId);
+        if (!(await render(card))) await sendCard(chatId, card);
+        return;
+      }
       if (!ACP.ready()) { await sendText(chatId, "❌ dsh ACP 未就绪。"); return; }
       try { await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd); const card = modelSettingsCard(ACP.getConfigOptions(ctx.sessionId), ctx.sessionId); if (!(await render(card))) await sendCard(chatId, card); }
       catch (e) { await sendText(chatId, `❌ 会话不可用：${e?.message ?? e}`); }
@@ -1366,7 +1412,28 @@ async function handleCommand(chatId, cmd, arg) {
     case "model": case "模型": {
       if (!ctx.sessionId) { await sendText(chatId, "当前没有会话。"); return; }
       if (!ACP.ready()) { await sendText(chatId, "❌ dsh ACP 未就绪。"); return; }
-      if (!arg) { try { await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd); await sendCard(chatId, modelSettingsCard(ACP.getConfigOptions(ctx.sessionId), ctx.sessionId)); } catch (e) { await sendText(chatId, `❌ ${e?.message ?? e}`); } return; }
+      if (!arg) {
+        if (ctx.relay) {
+          const st = await relayModelState(ctx.sessionId);
+          if (!st) { await sendText(chatId, "❌ 取模型列表失败：Web 侧不可用或插件过旧（需重启 dsh web）。"); return; }
+          await sendCard(chatId, modelSettingsCard(st.configOptions, ctx.sessionId)); return;
+        }
+        try { await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd); await sendCard(chatId, modelSettingsCard(ACP.getConfigOptions(ctx.sessionId), ctx.sessionId)); } catch (e) { await sendText(chatId, `❌ ${e?.message ?? e}`); } return;
+      }
+      if (ctx.relay) {
+        const st = await relayModelState(ctx.sessionId);
+        if (!st) { await sendText(chatId, "❌ 取模型列表失败：Web 侧不可用或插件过旧（需重启 dsh web）。"); return; }
+        const flat = []; for (const g of st.configOptions[0].options ?? []) for (const o of g.options ?? []) flat.push({ group: g.group, name: o.name, value: o.value });
+        const kw = arg.toLowerCase();
+        const hits = flat.filter((o) => `${o.group} ${o.name}`.toLowerCase().includes(kw) || o.value.toLowerCase().includes(kw));
+        if (hits.length === 0) { await sendText(chatId, `❌ 没有匹配「${arg}」的模型。`); return; }
+        if (hits.length > 1) { await sendText(chatId, `⚠️ 匹配到多个：${hits.map((o) => o.name).join("、")}`); return; }
+        const [provider, model] = JSON.parse(hits[0].value);
+        const picked = await relaySelectModel(ctx.sessionId, provider, model);
+        if (!picked) { await sendText(chatId, "❌ 切换失败：Web 侧拒绝（看 bridge.log）。"); return; }
+        await sendText(chatId, `✅ 模型已切换为 **${hits[0].name}**（下一个任务生效 · 🔗Web中继）`);
+        return;
+      }
       try { await ACP.ensureActive(ctx.sessionId, ctx.cwd ?? CONFIG.defaultCwd); } catch (e) { await sendText(chatId, `❌ 会话激活失败：${e?.message ?? e}`); return; }
       const co = ACP.getConfigOptions(ctx.sessionId); const m = (co ?? []).find((o) => o.id === "model"); const flat = [];
       for (const g of m?.options ?? []) for (const o of g.options ?? []) flat.push({ group: g.group ?? g.name, name: o.name, value: o.value });
