@@ -966,6 +966,11 @@ function sniffImage(buf) {
 async function handleImageMessage(chatId, ev) {
   if (seenMedia(ev.message_id)) { log("image dup ignored", ev.message_id); return; }
   const ctx = chatCtx(chatId);
+  // 下载图片要 10~20s；期间用户往往已经把文字发出来了。
+  // 用一个 promise 标记"正在取图"，runPrompt 会等它，避免图片被漏掉。
+  const task = { at: Date.now() };
+  task.promise = new Promise((resolve) => { task.done = resolve; });
+  ctx.imgTask = task;
   let imageKey = "";
   try { imageKey = JSON.parse(ev.content ?? "{}").image_key ?? ""; } catch { }
   if (!imageKey) {
@@ -988,6 +993,7 @@ async function handleImageMessage(chatId, ev) {
     const ackMid = await sendText(chatId, `🖼 图片已接收（${buf.length < 1024 ? `${buf.length}B` : `${Math.round(buf.length / 1024)}KB`}）。直接发文字说明，我会把图片连同文字一起发给当前会话——5 分钟内有效。若当前模型不支持图片输入，先发 /model 切到支持视觉的模型。`);
     log("image ack sent", ackMid);
   } catch (e) { log("image handle error", e?.stack ?? e?.message ?? String(e)); await sendText(chatId, `❌ 图片处理失败：${e.message}`); }
+  finally { try { task.done(); } catch { } if (ctx.imgTask === task) ctx.imgTask = null; }
 }
 async function handleFileMessage(chatId, ev) {
   if (seenMedia(ev.message_id)) { log("file dup ignored", ev.message_id); return; }
@@ -1059,8 +1065,14 @@ async function runPrompt(chatId, text) {
   }
   if (ctx.busy) { await sendMarkdown(chatId, "⏳ 当前会话正在执行任务，请等它完成或发 `/stop` 中断。"); return; }
   const sid = ctx.sessionId; const startAt = Date.now();
-  const img = (ctx.pendingImage && Date.now() - ctx.pendingImage.at < 300000) ? ctx.pendingImage : null;
+  // 图片还在下载就等它（用户常常"发图 → 立刻发文字"）
+  if (ctx.imgTask && Date.now() - ctx.imgTask.at < 120000) {
+    await Promise.race([ctx.imgTask.promise, new Promise((r) => setTimeout(r, 35000))]);
+  }
+  let img = (ctx.pendingImage && Date.now() - ctx.pendingImage.at < 300000) ? ctx.pendingImage : null;
   ctx.pendingImage = null;
+  // 建流式卡片等飞书 API 调用可能耗时数十秒，期间图片可能刚好落地——用前再补一次
+  const lateImage = () => { if (img) return; if (ctx.pendingImage && Date.now() - ctx.pendingImage.at < 300000) { img = ctx.pendingImage; } ctx.pendingImage = null; };
   const files = (ctx.pendingFile ?? []).filter((f) => Date.now() - f.at < 300000);
   ctx.pendingFile = null;
 
@@ -1094,6 +1106,7 @@ async function runPrompt(chatId, text) {
     let sc = null;
     try { const cardId = await createStreamingCard(text.slice(0, 60).replace(/\n/g, " ")); await sendCardEntity(chatId, cardId); sc = new StreamCard(cardId); }
     catch (e) { log("relay streaming card unavailable:", e.message); }
+    lateImage();
     let relayText = text;
     if (files.length) relayText = `（用户上传了文件：${files.map((f) => `${f.name} 在 ${f.path}`).join("、")}）\n\n${text}`;
     const sendPayload = { sessionId: sid, text: relayText };
@@ -1176,6 +1189,7 @@ async function runPrompt(chatId, text) {
   };
   try {
     await ACP.ensureActive(sid, ctx.cwd ?? CONFIG.defaultCwd);
+    lateImage();
     const stop = await ACP.prompt(sid, text, img, files);
     await finalize(chunks.join("").trim(), stop.stopReason);
   } catch (e) {
